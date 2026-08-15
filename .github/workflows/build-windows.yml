@@ -1,0 +1,127 @@
+name: Build Windows client for Serrebi Radio Palace
+
+# Builds the upstream PlayAural Windows client with one modification: the
+# hardcoded default server is repointed at palace.serrebiradio.com.
+#
+# Why this exists: a packaged PlayAural build exposes no server picker.
+# client/ui/login_dialog.py always uses the server entry with id
+# "official_server", and the only alternative is gated behind an
+# is_source_build check that is false in a frozen build. So the default has to
+# be changed at build time.
+#
+# Upstream is checked out directly rather than merged into this fork, so the
+# build always tracks upstream main with no fork-sync step to drift.
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Daily, a little after the server's own 04:30 America/Vancouver update.
+    - cron: "45 12 * * *"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out this fork (workflow and helper files)
+        uses: actions/checkout@v4
+        with:
+          path: repo
+
+      - name: Check out upstream PlayAural
+        uses: actions/checkout@v4
+        with:
+          repository: Daoductrung/PlayAural
+          ref: main
+          path: src
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install build dependencies
+        working-directory: src
+        run: python -m pip install --upgrade pip pyinstaller -r requirements.txt
+
+      - name: Repoint the default server
+        shell: pwsh
+        run: |
+          $file = "src/client/ui/login_dialog.py"
+          $old = '"Official Server", "wss://playaural.ddt.one", "443"'
+          $new = '"Serrebi Radio Palace", "wss://palace.serrebiradio.com", "443"'
+
+          $content = Get-Content -Raw $file
+          if ($content -notmatch [regex]::Escape($old)) {
+            Write-Error "Default server line not found. Upstream changed login_dialog.py; update this patch."
+            exit 1
+          }
+          $content = $content.Replace($old, $new)
+
+          # UTF-8 without BOM: a BOM here would change the file Python parses.
+          [System.IO.File]::WriteAllText(
+            (Resolve-Path $file), $content, (New-Object System.Text.UTF8Encoding($false))
+          )
+          Write-Output "Patched $file"
+
+      - name: Record the version being built
+        id: version
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path "src/server/core/server.py" -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          Write-Output "version=$v" >> $env:GITHUB_OUTPUT
+          Write-Output "Building PlayAural $v"
+
+      - name: Build updater.exe
+        working-directory: src
+        run: python -m PyInstaller --clean --noconfirm updater.spec
+
+      - name: Build PlayAural.exe
+        working-directory: src
+        run: python -m PyInstaller --clean --noconfirm PlayAural.spec
+
+      - name: Assemble the release folder
+        shell: pwsh
+        run: |
+          # Upstream's own build script copies updater.exe alongside the app.
+          Copy-Item "src/dist/updater.exe" "src/dist/PlayAural/updater.exe" -Force
+
+          # Helper files, so people already running upstream's build (whose
+          # identities.json still points at playaural.ddt.one) can be repointed
+          # too. A rebuilt default only helps brand new installs.
+          Copy-Item "repo/serrebi/*" "src/dist/PlayAural/" -Force
+
+          if (-not (Test-Path "src/dist/PlayAural/PlayAural.exe")) {
+            Write-Error "PlayAural.exe missing from the build output."
+            exit 1
+          }
+
+          Compress-Archive -Path "src/dist/PlayAural/*" `
+                           -DestinationPath "PlayAural-SerrebiRadioPalace-windows.zip" `
+                           -CompressionLevel Optimal
+          (Get-FileHash "PlayAural-SerrebiRadioPalace-windows.zip" -Algorithm SHA256).Hash `
+            | Out-File -Encoding ascii "PlayAural-SerrebiRadioPalace-windows.zip.sha256"
+
+      - name: Publish to a stable tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=windows-latest-serrebi
+          # Recreate the release so the download URL never changes.
+          gh release delete "$TAG" --yes --cleanup-tag --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$TAG" \
+            PlayAural-SerrebiRadioPalace-windows.zip \
+            PlayAural-SerrebiRadioPalace-windows.zip.sha256 \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "PlayAural ${{ steps.version.outputs.version }} for Serrebi Radio Palace" \
+            --notes "Automated build of upstream PlayAural main, with the default server set to wss://palace.serrebiradio.com.
+
+          Built from https://github.com/Daoductrung/PlayAural at version ${{ steps.version.outputs.version }}.
+          The only source change is the default server address in client/ui/login_dialog.py.
+
+          PlayAural is licensed under the GNU General Public License."

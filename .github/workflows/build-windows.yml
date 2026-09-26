@@ -27,19 +27,19 @@ jobs:
 
     steps:
       - name: Check out this fork (workflow and helper files)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           path: repo
 
       - name: Check out upstream PlayAural
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: Daoductrung/PlayAural
           ref: main
           path: src
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
